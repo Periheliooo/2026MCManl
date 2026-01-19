@@ -5,64 +5,50 @@ from prophet import Prophet
 import logging
 import os
 
-# --- 路径配置保持不变 ---
+# --- 路径配置 ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 DATA_PATH = os.path.join(PROJECT_ROOT, 'data', 'processed', 'traffic_5min.csv')
 MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-MODEL_PATH = os.path.join(MODEL_DIR, 'final_model.pkl')
+
+# 定义两个模型的保存路径
+MODEL_PATH_WORK = os.path.join(MODEL_DIR, 'model_workday.pkl')
+MODEL_PATH_REST = os.path.join(MODEL_DIR, 'model_weekend.pkl')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def create_advanced_model():
+def create_single_mode_model(is_workday_mode=True):
     """
-    升级版模型工厂：
-    1. 区分 '工作日' 和 '周末' 的不同日周期模式 (Conditional Seasonality)。
-    2. 放宽正则化参数，允许更剧烈的波动。
+    创建单模式模型。
+    不需要复杂的条件语句了，因为每个模型只吃属于它自己的数据。
     """
     model = Prophet(
-        daily_seasonality=False,      # 必须关闭默认，我们要手动拆分
-        weekly_seasonality=True,      # 保留大趋势的周周期
+        daily_seasonality=False,   # 关闭默认，手动添加
+        weekly_seasonality=False,  # 不需要周周期，因为我们已经按天拆分了
         seasonality_mode='additive',
-        
-        # --- 策略 B: 释放灵活性 ---
-        changepoint_prior_scale=0.1,  # (原0.05) 允许趋势变得更灵活
-        seasonality_prior_scale=15.0  # (原10.0) 允许季节性波动的幅度更大
+        changepoint_prior_scale=0.05 
     )
     
-    # --- 策略 A: 添加条件季节性 ---
-    # 定义工作日模式 (Workdays): 尖峰很高，且有早晚高峰，给高阶数 N=20
-    model.add_seasonality(
-        name='workday_daily', 
-        period=1, 
-        fourier_order=20,  # 提高阶数以捕捉更尖锐的峰值
-        condition_name='is_workday' # 只有满足此条件时才应用
-    )
+    # 设定傅里叶阶数
+    # 工作日流量复杂，阶数高一点 (12)
+    # 周末流量简单，阶数低一点 (6)
+    order = 12 if is_workday_mode else 6
     
-    # 定义周末模式 (Weekends): 比较平缓，给低阶数 N=10 避免过拟合
     model.add_seasonality(
-        name='weekend_daily', 
+        name='daily', 
         period=1, 
-        fourier_order=10, 
-        condition_name='is_weekend'
+        fourier_order=order
     )
     
     return model
 
 def prepare_data(df):
-    """
-    特征工程：为条件季节性添加布尔列
-    """
     df = df.copy()
     df['ds'] = pd.to_datetime(df['Time'])
     df['y'] = df['people_in']
-    
-    # 构造条件列
-    # dayofweek: 0=Mon, 6=Sun
+    # 标记周末 (5=Sat, 6=Sun)
     df['is_weekend'] = df['ds'].dt.dayofweek >= 5
-    df['is_workday'] = ~df['is_weekend']
-    
     return df
 
 def train_and_save_final_model():
@@ -71,24 +57,30 @@ def train_and_save_final_model():
 
     logger.info(f"Loading data from {DATA_PATH}...")
     df = pd.read_csv(DATA_PATH)
+    df = prepare_data(df)
     
-    # --- 关键修改：应用特征工程 ---
-    df_prepared = prepare_data(df)
-    
-    logger.info("Initializing ADVANCED model with Conditional Seasonality...")
-    model = create_advanced_model()
-    
-    logger.info("Fitting model on full dataset...")
-    model.fit(df_prepared)
+    # --- 核心修改：拆分数据集 ---
+    df_work = df[~df['is_weekend']].copy() # 工作日数据
+    df_rest = df[df['is_weekend']].copy()  # 周末数据
     
     if not os.path.exists(MODEL_DIR):
         os.makedirs(MODEL_DIR)
+
+    # 1. 训练工作日模型
+    logger.info(f"Training Workday Model (Samples: {len(df_work)})...")
+    m_work = create_single_mode_model(is_workday_mode=True)
+    m_work.fit(df_work)
+    with open(MODEL_PATH_WORK, 'wb') as f:
+        pickle.dump(m_work, f)
+        
+    # 2. 训练周末模型
+    logger.info(f"Training Weekend Model (Samples: {len(df_rest)})...")
+    m_rest = create_single_mode_model(is_workday_mode=False)
+    m_rest.fit(df_rest)
+    with open(MODEL_PATH_REST, 'wb') as f:
+        pickle.dump(m_rest, f)
     
-    logger.info(f"Saving model to {MODEL_PATH}...")
-    with open(MODEL_PATH, 'wb') as f:
-        pickle.dump(model, f)
-    
-    logger.info("Done.")
+    logger.info("Done. Two separate models saved.")
 
 if __name__ == "__main__":
     train_and_save_final_model()
