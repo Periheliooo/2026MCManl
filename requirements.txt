@@ -1,0 +1,25 @@
+# === Core Data Science ===
+pandas>=2.0.0
+numpy>=1.24.0
+
+# === Visualization (Science/Nature Style) ===
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# === Machine Learning & Stats ===
+scikit-learn>=1.2.0
+scipy>=1.10.0
+
+# === Time Series Prediction (The Crystal Ball) ===
+prophet>=1.1.0
+# 如果安装 prophet 有困难，可以备选 statsmodels
+statsmodels>=0.14.0
+
+# === Simulation (The Strategic Wait) ===
+simpy>=4.0.0
+
+# === Engineering Utilities ===
+tqdm            # 进度条，让你的代码跑起来显得很专业
+jupyterlab      # 交互式笔记本
+openpyxl        # 读写 Excel 必须
+argparse        # 命令行参数解析 (标准库，通常内置，但列出无妨)
