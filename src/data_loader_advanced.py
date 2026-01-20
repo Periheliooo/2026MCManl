@@ -1,91 +1,64 @@
 import pandas as pd
-import numpy as np
 import os
-from pathlib import Path
 
-# ============================
-# 1. 路径配置
-# ============================
-current_dir = Path(__file__).resolve().parent
-project_root = current_dir.parent
-RAW_PATH = project_root / "data" / "raw"
-PROCESSED_PATH = project_root / "data" / "processed"
+def create_labeled_training_data():
+    input_path = 'data/processed/master_traffic_table.csv'
+    output_path = 'data/processed/labeled_traffic_data_for_training.csv'
+    
+    # 1. 读取数据
+    if not os.path.exists(input_path):
+        # Fallback for demonstration
+        input_path = 'master_traffic_table.csv'
+        
+    df = pd.read_csv(input_path)
+    df['Time'] = pd.to_datetime(df['Time'])
+    
+    # 辅助计算列
+    df['hour_minute'] = df['Time'].dt.hour + df['Time'].dt.minute / 60.0
+    
+    # 2. 定义修正后的判定逻辑
+    def get_traffic_state(row):
+        # 规则 1: 周末全天为空闲期
+        if row['is_weekend']:
+            return 1  # Idle Period
+        
+        # 规则 2: 工作日根据时间段判定
+        hm = row['hour_minute']
+        
+        if 9.5 <= hm < 11.0:
+            return 2  # Morning Peak (09:30 - 11:00)
+        elif 11.5 <= hm < 14.5:
+            return 3  # Lunch Peak (11:30 - 14:30)
+        elif 18.0 <= hm < 20.0:
+            return 4  # Evening Peak (18:00 - 20:00)
+        else:
+            return 1  # Idle Period (Other times)
 
-def create_master_table():
-    print("🚀 Building the Ultimate Master Table (Integration of 6 Files)...")
+    # 应用逻辑
+    df['traffic_state_id'] = df.apply(get_traffic_state, axis=1)
     
-    # --- Check Files ---
-    if not RAW_PATH.exists():
-        raise FileNotFoundError(f"❌ Data directory not found: {RAW_PATH}")
-
-    # --- 1. Load All Raw Data ---
-    print("   Loading raw CSVs...")
-    df_hall = pd.read_csv(RAW_PATH / 'hall_calls.csv')
-    df_car = pd.read_csv(RAW_PATH / 'car_calls.csv')
-    df_stops = pd.read_csv(RAW_PATH / 'car_stops.csv')
-    df_load = pd.read_csv(RAW_PATH / 'load_changes.csv')
-    df_maint = pd.read_csv(RAW_PATH / 'maintenance_mode.csv')
+    # 添加文本标签方便查看 (训练时可选择是否保留)
+    state_map = {
+        1: 'Idle Period',
+        2: 'Morning Peak',
+        3: 'Lunch Peak',
+        4: 'Evening Peak'
+    }
+    df['traffic_state'] = df['traffic_state_id'].map(state_map)
     
-    # Time Conversion (Standardization)
-    for df in [df_hall, df_car, df_stops, df_load, df_maint]:
-        df['Time'] = pd.to_datetime(df['Time'])
-
-    # --- 2. Aggregation (Resampling to 5min) ---
-    # 我们以 5分钟 为一个“原子时间片”
-    freq = '5min'
+    # 3. 数据清洗：移除时间列
+    # 根据要求，去除 Time, hour, day_of_week 等，只保留流量特征和标签
+    # 这样模型只能看到：hall_up, hall_down, car_calls, people_in, people_out, total_stops, maint_events, total_demand
+    cols_to_drop = ['Time', 'hour', 'minute', 'day_of_week', 'day_name', 'is_weekend', 'hour_minute']
+    training_df = df.drop(columns=cols_to_drop)
     
-    print("   Aggregating features...")
+    # 4. 保存
+    training_df.to_csv(output_path, index=False)
     
-    # [A] Hall Calls: Split Up vs Down
-    # 这对区分早晚高峰至关重要
-    hall_up = df_hall[df_hall['Direction'] == 'Up'].set_index('Time').resample(freq)['Floor'].count().rename('hall_up')
-    hall_down = df_hall[df_hall['Direction'] == 'Down'].set_index('Time').resample(freq)['Floor'].count().rename('hall_down')
-    
-    # [B] Car Calls: Internal Demand
-    # Only count 'Register' actions (Ignore Cancel)
-    car_calls = df_car[df_car['Action'] == 'Register'].set_index('Time').resample(freq)['Floor'].count().rename('car_calls')
-    
-    # [C] Load Changes: Passenger Flow
-    # Convert kg to people (75kg/person)
-    df_load['people_in'] = (df_load['Load In (kg)'] / 75).round()
-    df_load['people_out'] = (df_load['Load Out (kg)'] / 75).round()
-    
-    load_in = df_load.set_index('Time').resample(freq)['people_in'].sum().rename('people_in')
-    load_out = df_load.set_index('Time').resample(freq)['people_out'].sum().rename('people_out')
-    
-    # [D] Car Stops: Service Intensity
-    stops = df_stops.set_index('Time').resample(freq)['Floor'].count().rename('total_stops')
-    
-    # [E] Maintenance: Disruptions
-    # Count distinct maintenance entries in this window
-    maint_events = df_maint[df_maint['Action'] == 'Enter'].set_index('Time').resample(freq)['Elevator ID'].count().rename('maint_events')
-
-    # --- 3. Merge All Features ---
-    # concat 会自动按时间索引对齐 (Outer Join)
-    dfs = [hall_up, hall_down, car_calls, load_in, load_out, stops, maint_events]
-    df_master = pd.concat(dfs, axis=1).fillna(0)
-    
-    # --- 4. Enhance Time Features ---
-    # 添加你要求的“星期几”等信息
-    df_master['hour'] = df_master.index.hour
-    df_master['minute'] = df_master.index.minute
-    df_master['day_of_week'] = df_master.index.dayofweek # 0=Mon, 6=Sun
-    df_master['day_name'] = df_master.index.day_name()
-    df_master['is_weekend'] = df_master['day_of_week'] >= 5
-    
-    # Add Total Demand
-    df_master['total_demand'] = df_master['hall_up'] + df_master['hall_down'] + df_master['car_calls']
-    
-    # --- 5. Save ---
-    PROCESSED_PATH.mkdir(exist_ok=True)
-    save_path = PROCESSED_PATH / 'master_traffic_table.csv'
-    
-    print(f"✅ Master Table Created! Shape: {df_master.shape}")
-    print(f"💾 Saved to: {save_path}")
-    print("\n🔍 Preview (First 5 rows):")
-    print(df_master[['day_name', 'hour', 'hall_up', 'hall_down', 'people_in', 'total_stops']].head())
-    
-    return df_master
+    print(f"处理完成。训练数据已保存至: {output_path}")
+    print("保留的特征列:", training_df.columns.tolist())
+    print("\n各状态样本数分布:")
+    print(training_df['traffic_state'].value_counts())
 
 if __name__ == "__main__":
-    create_master_table()
+    create_labeled_training_data()
